@@ -330,7 +330,7 @@ class RedCAPMapping {
         $redCAPMapping['ADENO_CHARACT']['METASTASIS_LOCATION'] = ['redCAP' => 'metastasis_loc', 'type' => 'VERTICAL_CHECK'];
         $redCAPMapping['ADENO_CHARACT']['SPECIFOTHER_METLOC'] = ['redCAP' => 'specifother_metloc', 'type' => 'TEXT_AREA'];
 
-        $redCAPMapping['BIOCHEMICAL']['BLOOD_TEST'] = ['redCAP' => 'blood_test', 'type' => 'BOOLEAN'];
+        $redCAPMapping['BIOCHEMICAL']['BLOOD_TEST'] = ['redCAP' => 'blood_test', 'type' => 'VERTICAL_RADIO'];
         $redCAPMapping['BIOCHEMICAL']['DATE_BLOOD'] = ['redCAP' => 'date_blood', 'type' => 'DATE'];
         $redCAPMapping['BIOCHEMICAL']['LEUKOCYTES'] = ['redCAP' => 'leukocityes', 'type' => 'NUMERICAL'];
         $redCAPMapping['BIOCHEMICAL']['PLATELETS'] = ['redCAP' => 'platelets', 'type' => 'NUMERICAL'];

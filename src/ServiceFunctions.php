@@ -196,6 +196,13 @@ class ServiceFunctions {
             $admission = $api->admission_create($patient->getId(), $subscriptionId, DateHelper::currentDate($GLOBALS['DEFAULT_TIMEZONE']));
         }
 
+        // $enrollDate = $RedCAPData['extraction_date'];
+        // if ($enrollDate && $ $enrollDate != explode(' ', $admission->getEnrolDate())[0]) {
+        // // Update the enrollment date of the admission if it is different
+        // $admission->setEnrolDate($enrollDate);
+        // $admission->save();
+        // }
+
         foreach (RedCAPMapping::getTaskCodes() as $taskCode) {
             if (RedCAPMapping::taskDataIsEmpty($taskCode, $RedCAPData)) {
                 continue; // No data informed for this task
