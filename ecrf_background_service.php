@@ -211,21 +211,17 @@ function import_aliquots($parameters) {
             $admission->setEnrolDate($sampleDate);
             $admission->setAdmissionDate($sampleDate);
             $admission->save();
-            if (!$patient || !$bpForm) {
+            if (!$bpForm) {
+                $msg = "Sample $displayName skipped. Aliquots already loaded";
+                $serviceResponse->addDetails($msg);
+                ServiceLogger::getInstance()->info($msg);
+                $numSkipped++;
                 continue;
             }
 
             $aliquotIds = [];
             foreach (array_values($patientSamples['samples']) as $ids) {
                 $aliquotIds = array_merge($aliquotIds, $ids);
-            }
-            if (count($aliquotIds) == count(Aliquot::findAliquots($aliquotIds))) {
-                // All aliquots already exist. No need to import
-                $msg = "Aliquots of sample $displayName already loaded. Data skipped.";
-                $serviceResponse->addDetails($msg);
-                ServiceLogger::getInstance()->info($msg);
-                $numSkipped++;
-                continue;
             }
 
             ServiceFunctions::updateBloodProcessingData($bpTask, $bpForm, $patientSamples['samples'], $sampleDate, $sampleStartTime, $sampleEndTime);

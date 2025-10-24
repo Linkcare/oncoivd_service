@@ -861,9 +861,18 @@ class ServiceFunctions {
 
         $bpForm = null;
         $bpTask = null;
+        $numForms = 0;
         foreach ($tasks as $task) {
             foreach ($task->getForms() as $form) {
-                if ($form->isClosed() || $form->getFormCode() != 'BLOOD_PROCESSING') {
+                if ($form->getFormCode() != 'BLOOD_PROCESSING') {
+                    continue;
+                }
+                $numForms++;
+                if ($form->isClosed()) {
+                    /*
+                     * The BLOOD PROCESSION FORM exists, but it is closed.
+                     * This is not considered an error, but simply indicates that the aliquots are already registered there is no need to do it again.
+                     */
                     continue;
                 }
                 $bpForm = $form;
@@ -871,8 +880,8 @@ class ServiceFunctions {
                 break;
             }
         }
-        if (!$bpForm) {
-            throw new ServiceException(ErrorCodes::NOT_FOUND, "No BLOOD PROCESSING task found for patient $patientRef");
+        if (!$bpForm && $numForms == 0) {
+            throw new ServiceException(ErrorCodes::NOT_FOUND, "The 'BLOOD PROCESSING' FORM was not found for patient $patientRef");
         }
 
         return [$patient, $admission, $bpTask, $bpForm];
