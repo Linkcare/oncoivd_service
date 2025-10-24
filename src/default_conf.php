@@ -75,4 +75,4 @@ $GLOBALS['TEAM_CODE'] = 'ONCOIVD';
 
 date_default_timezone_set($GLOBALS['DEFAULT_TIMEZONE']);
 
-$GLOBALS['VERSION'] = '1.0';
+$GLOBALS['VERSION'] = '1.1';
