@@ -23,13 +23,18 @@ class APIForm {
     /**
      *
      * @param SimpleXMLElement $xmlNode
+     * @param APIForm $form (optionl) If provided, the data will be loaded into this object instead of creating a new one
      * @return APIForm
      */
-    static public function parseXML($xmlNode) {
+    static public function parseXML($xmlNode, $form = null) {
         if (!$xmlNode) {
             return null;
         }
-        $form = new APIForm();
+
+        if (!$form) {
+            $form = new APIForm();
+        }
+
         $form->id = NullableString($xmlNode->ref);
         if ($xmlNode->code) {
             $form->formCode = NullableString((string) $xmlNode->code);
@@ -140,6 +145,11 @@ class APIForm {
      * METHODS
      * **********************************
      */
+    public function refresh() {
+        $requestQuestions = ($this->questions !== null);
+        $this->api->form_get_summary($this->id, $requestQuestions, false, $this);
+    }
+
     /**
      *
      * @return boolean
@@ -238,7 +248,7 @@ class APIForm {
      * @param boolean $create Create the question in the array if it does not exist?
      * @return APIQuestion
      */
-    public function findArrayQuestion($arrayRef, $row, $questionId, $create = false, $questionType = null) {
+    public function findArrayQuestion($arrayRef, $row, $questionId, $create = false) {
         $referenceQuestion = null;
         $q = null;
         foreach ($this->getQuestions() as $q) {
@@ -267,7 +277,8 @@ class APIForm {
             if ($referenceQuestion) {
                 $q = clone $referenceQuestion;
             } else {
-                $q = new APIQuestion($questionId, null, null, $questionType);
+                $q = new APIQuestion();
+                $q->setItemCode($questionId);
                 $q->setArrayRef($arrayRef);
             }
 

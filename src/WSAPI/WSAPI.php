@@ -1,5 +1,5 @@
 <?php
-$GLOBALS['WSAPI_VERSION'] = "1.2";
+$GLOBALS['WSAPI_VERSION'] = "1.1";
 
 require_once ("DateHelper.php");
 require_once ("APIException.php");

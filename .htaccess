@@ -5,5 +5,8 @@ Options -Indexes
 
 <IfModule mod_rewrite.c>
 RewriteEngine on
+RewriteRule ^ecrf_service/(.*)$ ecrf_background_service.php?function=$1 [QSA,L]
+
+RewriteCond %{REQUEST_URI} !^/services/oncoivd/(ecrf_background_service|deploy_service|rest_service)\.php$
 RewriteRule ^(.*)$ rest_service.php?function=$1 [QSA,L]
 </IfModule>

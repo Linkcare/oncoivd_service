@@ -1014,7 +1014,7 @@ class LinkcareSoapAPI {
      * @throws APIException
      * @return int
      */
-    function form_insert($taskId, $formCode, $parameters = null, $newFormCode = null) {
+    function form_insert($taskId, $formCode, $parameters, $newFormCode = null) {
         $taskId = null;
         $params = ["task" => $taskId, "form_code" => $formCode, 'new_form_code' => $newFormCode,
                 "parameters" => $parameters ? json_encode($parameters) : null];
@@ -1031,15 +1031,15 @@ class LinkcareSoapAPI {
      * @param int $formId
      * @param boolean $withQuestions
      * @param boolean $asClosed
+     * @param APIForm $form (optional) if provided, the data will be stored in this APIForm object instead of creating a new one
      * @throws APIException
      * @return APIForm
      */
-    public function form_get_summary($formId, $withQuestions = false, $asClosed = false) {
-        $form = null;
+    public function form_get_summary($formId, $withQuestions = false, $asClosed = false, $form = null) {
         $params = ["form" => $formId, "with_questions" => $withQuestions ? "1" : "", "as_closed" => $asClosed ? "1" : ""];
         $resp = $this->invoke('form_get_summary', $params);
         if ($xml = simplexml_load_string($resp->getResult())) {
-            $form = APIForm::parseXML($xml);
+            $form = APIForm::parseXML($xml, $form);
         }
 
         return $form;

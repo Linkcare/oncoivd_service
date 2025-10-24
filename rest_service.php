@@ -28,10 +28,20 @@ if ($_SERVER['REQUEST_METHOD'] != 'POST') {
 // Response is always returned as JSON
 header('Content-type: application/json');
 
+$requestHeaders = array_change_key_case(getallheaders(), CASE_LOWER);
+// Check if the request contains the API token in the headers
+$authToken = array_key_exists('x-api-token', $requestHeaders) ? $requestHeaders['x-api-token'] : null;
+
 $function = $_GET['function'];
 $logger = ServiceLogger::init($GLOBALS['LOG_LEVEL'], $GLOBALS['LOG_DIR']);
 
-$publicFunctions = ['import_redcap'];
+$systemFunctions = ['deploy_service'];
+$programFunctions = ['add_aliquots'];
+$shipmentManagementFunctions = [shipment_locations, 'shipment_list', 'shipment_create', 'shipment_details', 'shippable_aliquots', 'find_aliquot',
+        'shipment_add_aliquot', 'shipment_remove_aliquot', 'shipment_update', 'shipment_send', 'shipment_start_reception', 'shipment_finish_reception',
+        'shipment_delete', 'shipment_set_aliquot_condition'];
+
+$publicFunctions = array_merge($systemFunctions, $programFunctions, $shipmentManagementFunctions);
 
 if (in_array($function, $publicFunctions)) {
     $json = file_get_contents('php://input');
@@ -42,22 +52,35 @@ if (in_array($function, $publicFunctions)) {
         }
 
         // The public rest function invoked from the Linkcare Platform's PROGRAM must be executed in a service session
-        initServiceSession();
+        $surrogate = in_array($function, $programFunctions);
+        initServiceSession($authToken, $parameters, $surrogate);
+        Database::init($GLOBALS['SERVICE_DB_URI'], $logger);
+        Database::getInstance()->beginTransaction(); // Execute all commands in transactional mode
         $serviceResponse = $function($parameters);
+        Database::getInstance()->commit();
     } catch (ServiceException $e) {
+        if (Database::getInstance()) {
+            Database::getInstance()->rollback();
+        }
         $logger->error("Service Exception: " . $e->getErrorMessage());
-        $serviceResponse = new BackgroundServiceResponse(BackgroundServiceResponse::ERROR, $e->getErrorMessage());
+        $serviceResponse = new ServiceResponse(null, $e->getErrorMessage());
     } catch (Exception $e) {
+        if (Database::getInstance()) {
+            Database::getInstance()->rollback();
+        }
         $logger->error("General exception: " . $e->getMessage());
-        $serviceResponse = new BackgroundServiceResponse(BackgroundServiceResponse::ERROR, $e->getMessage());
+        $serviceResponse = new ServiceResponse(null, $e->getMessage());
     } catch (Error $e) {
+        if (Database::getInstance()) {
+            Database::getInstance()->rollback();
+        }
         $logger->error("Execution error: " . $e->getMessage());
-        $serviceResponse = new BackgroundServiceResponse(BackgroundServiceResponse::ERROR, $e->getMessage());
+        $serviceResponse = new ServiceResponse(null, $e->getMessage());
     } finally {
         WSAPI::apiDisconnect();
     }
 } else {
-    $serviceResponse = new BackgroundServiceResponse(BackgroundServiceResponse::ERROR, "Function $function not implemented");
+    $serviceResponse = new ServiceResponse(null, "Function $function not implemented");
 }
 
 echo $serviceResponse->toString();
@@ -72,10 +95,26 @@ return;
  * @param stdClass $parameters Parameters provided in the request body
  * @param bool $surrogateSession If true, the user session will be surrogated by the SERVICE_USER
  */
-function initServiceSession() {
+function initServiceSession($authToken, $parameters, $surrogateSession = true) {
+    if (!$authToken) {
+        ServiceLogger::getInstance()->trace("No API token provided in the request headers. Use the session token provided in the parameters");
+        // If an API token was not provided in the request headers, then check if it is provided in the parameters
+        $authToken = loadParam($parameters, 'session');
+    } else {
+        ServiceLogger::getInstance()->trace("API token provided in the request headers");
+    }
+
+    /* Join the session of the user that is calling the service to retrieve the timezone and language */
+    $apiSession = WSAPI::apiConnect($GLOBALS["WS_LINK"], $authToken);
+    $userLanguage = $apiSession->getSession()->getLanguage();
+    $userTimezone = $apiSession->getSession()->getTimezone();
+
     /* All the operations will be performed by a "service" user */
-    WSAPI::apiConnect($GLOBALS["WS_LINK"], null, $GLOBALS["SERVICE_USER"], $GLOBALS["SERVICE_PASSWORD"], null, null, false,
-            $GLOBALS["DEFAULT_LANGUAGE"], $GLOBALS["DEFAULT_TIMEZONE"]);
+    if ($surrogateSession) {
+        ServiceLogger::getInstance()->trace("A Service session will be created using the timezone and language of the user session");
+        WSAPI::apiConnect($GLOBALS["WS_LINK"], null, $GLOBALS["SERVICE_USER"], $GLOBALS["SERVICE_PASSWORD"], null, null, false, $userLanguage,
+                $userTimezone);
+    }
 }
 
 /* ****************************************************************** */
@@ -93,129 +132,17 @@ function initServiceSession() {
  * - SERUM: "SERUM_STATUS_FORM"
  *
  * @param stdClass $parameters
- * @return BackgroundServiceResponse
  */
-function import_redcap($parameters) {
-    $serviceResponse = new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "");
+function add_aliquots($parameters) {
+    // Reference of the FORM that is initializing a shipment
+    $bloodProcessingFormId = loadParam($parameters, 'processing_form');
+    // Reference of the TEAM (laborarory) that has processed the blood samples and generated the aliquots
+    $patientId = loadParam($parameters, 'patient');
+    $patientRef = loadParam($parameters, 'patient_ref');
+    $labTeamId = loadParam($parameters, 'lab_team');
+    $procDate = loadParam($parameters, 'date');
+    $procTime = loadParam($parameters, 'time');
 
-    $redcapFiles = glob(__DIR__ . '/redcap_data/*.csv');
-    if (empty($redcapFiles)) {
-        return new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "No RedCAP data files (*.csv) pending to import.");
-    }
-
-    $filePath = $redcapFiles[0]; // Get the first file found;
-    $processFile = $filePath . '.processing';
-    if (file_exists($processFile) && !unlink($processFile)) {
-        return new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "Error deleting previous file: $processFile. Verify the the directory is writable.");
-    }
-
-    if (!rename($filePath, $processFile)) {
-        return new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "Error renaming $filePath to $processFile. Verify the the directory is writable.");
-    }
-
-    $redCapData = ServiceFunctions::loadRedCAPData($processFile);
-    foreach ($redCapData as $patientRef => $patientData) {
-        try {
-            ServiceFunctions::updatePatientData($patientRef, $patientData);
-        } catch (Exception $e) {
-            $serviceResponse->setCode(BackgroundServiceResponse::ERROR);
-            $errorMsg = "Error importing RedCAP data for patient $patientRef: " . $e->getMessage();
-            $serviceResponse->setMessage($errorMsg);
-            $serviceResponse->addDetails("Patient $patientRef: ERROR");
-            ServiceLogger::getInstance()->error($errorMsg);
-            return $serviceResponse;
-        }
-
-        $msg = "Patient $patientRef: RedCAP data imported successfully.";
-        ServiceLogger::getInstance()->info($msg, 1);
-        echo " "; // Send space to the output buffer to avoid timeouts, because the processing of all patients can take a long time
-        flush();
-    }
-
-    $msg = "RedCAP data imported successfully. Total patients processed: " . count($redCapData);
-    $serviceResponse->setCode(BackgroundServiceResponse::SUCCESS);
-    $serviceResponse->addDetails($msg);
-
-    unlink($processFile); // Remove the processing file after processing
-
-    return $serviceResponse;
+    return ServiceFunctions::addAliquots($patientId, $patientRef, $bloodProcessingFormId, $labTeamId, $procDate, $procTime);
 }
 
-function summary_report() {
-    $sql = "SELECT patient_list.PATIENT, diagnose.NUM_POLYPS,diagnose.NUM_POLYPS-diagnose.NEOPLASIC AS NON_NEOPLASIC, diagnose.NEOPLASIC, carcinoma.SERRATED, risk.LOW_DISPLASIA, risk.HIGH_DISPLASIA, carcinoma.CARCINOMAS
-        FROM
-        	(
-        		SELECT i.VALUE AS PATIENT
-        		FROM
-        			PATIENTS p, IDENTIFIERS i, ADMISSIONS a 
-        		WHERE
-        			a.DELETED IS NULL
-        			AND p.ID_PATIENT = a.ID_PATIENT	
-        			AND p.ID_CONTACT = i.ID_CONTACT
-        			AND i.CODE = 'PARTICIPANT_REF'
-        	) patient_list
-        	LEFT JOIN		
-        		-- Pacientes con NEOPLASIA (ADENOMA)
-        		(
-        			SELECT i.VALUE AS PATIENT,ii.ITEM_CODE,
-        				COUNT(*) AS NUM_POLYPS,
-        				SUM(CASE WHEN ii.ITEM_VALUE=2 THEN 1 ELSE 0 END) AS NEOPLASIC
-        			FROM
-        				PATIENTS p, IDENTIFIERS i, ADMISSIONS a, TASK_INSTANCES ti, FORM_INSTANCES fi, ITEM_INSTANCES ii 
-        			WHERE
-        				a.DELETED IS NULL
-        				AND a.ID_ADMISSION = ti.ID_ADMISSION
-        				AND p.ID_PATIENT = a.ID_PATIENT	
-        				AND p.ID_CONTACT = i.ID_CONTACT
-        				AND i.CODE = 'PARTICIPANT_REF'
-        				AND ti.ID_TASK = fi.ID_TASK
-        				AND fi.ID_FORM = ii.ID_FORM
-        				AND ti.TASK_CODE = 'ANATHOMOPATOLOGICAL_REPORT'
-        				AND ii.ITEM_CODE ='POLYOP_DIAGNOSE'
-        				AND ii.EMPTY_ROW =0
-        			GROUP BY i.VALUE
-        		) diagnose ON patient_list.PATIENT = diagnose.PATIENT
-        	LEFT JOIN		
-        		-- Riesgo del ADENOMA
-        		(
-        			SELECT i.VALUE AS PATIENT,ii.ITEM_CODE,
-        				SUM(CASE WHEN ii.ITEM_VALUE=1 THEN 1 ELSE 0 END) AS LOW_DISPLASIA,
-        				SUM(CASE WHEN ii.ITEM_VALUE=2 THEN 1 ELSE 0 END) AS HIGH_DISPLASIA
-        			FROM
-        				PATIENTS p, IDENTIFIERS i, ADMISSIONS a, TASK_INSTANCES ti, FORM_INSTANCES fi, ITEM_INSTANCES ii 
-        			WHERE
-        				a.DELETED IS NULL
-        				AND a.ID_ADMISSION = ti.ID_ADMISSION
-        				AND p.ID_PATIENT = a.ID_PATIENT	
-        				AND p.ID_CONTACT = i.ID_CONTACT
-        				AND i.CODE = 'PARTICIPANT_REF'
-        				AND ti.ID_TASK = fi.ID_TASK
-        				AND fi.ID_FORM = ii.ID_FORM
-        				AND ti.TASK_CODE = 'ANATHOMOPATOLOGICAL_REPORT'
-        				AND ii.ITEM_CODE ='NEOPLASTIC_DYSPLASIA'
-        				AND ii.EMPTY_ROW =0
-        			GROUP BY i.VALUE
-        		) risk ON patient_list.PATIENT = risk.PATIENT
-        	LEFT JOIN			
-        		-- CARCINOMA
-        		(
-        			SELECT i.VALUE AS PATIENT,ii.ITEM_CODE,
-        				SUM(CASE WHEN ii.ITEM_VALUE=3 THEN 1 ELSE 0 END) AS CARCINOMAS,
-        				SUM(CASE WHEN ii.ITEM_VALUE=2 THEN 1 ELSE 0 END) AS SERRATED
-        			FROM
-        				PATIENTS p, IDENTIFIERS i, ADMISSIONS a, TASK_INSTANCES ti, FORM_INSTANCES fi, ITEM_INSTANCES ii 
-        			WHERE
-        				a.DELETED IS NULL
-        				AND a.ID_ADMISSION = ti.ID_ADMISSION
-        				AND p.ID_PATIENT = a.ID_PATIENT	
-        				AND p.ID_CONTACT = i.ID_CONTACT
-        				AND i.CODE = 'PARTICIPANT_REF'
-        				AND ti.ID_TASK = fi.ID_TASK
-        				AND fi.ID_FORM = ii.ID_FORM
-        				AND ti.TASK_CODE = 'ANATHOMOPATOLOGICAL_REPORT'
-        				AND ii.ITEM_CODE ='NEOPLASTIC_TYPE'
-        				AND ii.EMPTY_ROW =0
-        			GROUP BY i.VALUE
-        		) carcinoma ON patient_list.PATIENT = carcinoma.PATIENT
-        ORDER BY patient_list.PATIENT";
-}

@@ -15,6 +15,7 @@ class ServiceLogger {
     private $asHTML = false;
     private $toSTDOUT = false;
     private $addStackInfo = false;
+    private $customLogFile = null;
 
     private function __construct($logLevel = null, $logDir = null) {
         if (!$logLevel) {
@@ -71,6 +72,10 @@ class ServiceLogger {
         }
 
         return self::$instance;
+    }
+
+    public function setCustomLogFile($filePath) {
+        $this->customLogFile = $filePath;
     }
 
     /**
@@ -229,6 +234,11 @@ class ServiceLogger {
 
         if ($this->logDir) {
             file_put_contents($this->logDir . $date . '.log', $logMsg . "\n", FILE_APPEND);
+        }
+        if ($this->customLogFile) {
+            if (file_put_contents($this->customLogFile, $logMsg . "\n", FILE_APPEND) === false) {
+                error_log('Service logger error: cannot write to custom log file ' . $this->customLogFile);
+            }
         }
 
         $lineBreak = "\n";
