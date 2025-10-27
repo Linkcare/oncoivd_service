@@ -130,6 +130,7 @@ class Shipment {
         $this->trackedPropertyCopy($json, 'sentToId');
         $this->trackedPropertyCopy($json, 'sendDate', $timezone);
         $this->trackedPropertyCopy($json, 'senderId');
+        $this->trackedPropertyCopy($json, 'sender');
         $this->trackedPropertyCopy($json, 'receptionDate', $timezone);
         $this->trackedPropertyCopy($json, 'receiverId');
         $this->trackedPropertyCopy($json, 'receiver');
@@ -278,7 +279,7 @@ class Shipment {
         }
 
         if (empty($updateFields)) {
-            throw new ServiceException(ErrorCodes::DATA_MISSING, "No data provided to update the shipment");
+            return; // Nothing to update
         }
 
         $updateFields = implode(', ', $updateFields);

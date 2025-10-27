@@ -125,7 +125,7 @@ function shipment_update($parameters) {
     $timezone = $api->getSession()->getTimezone();
 
     if ($shipment->statusId == ShipmentStatus::PREPARING) {
-        preserveProperties($parameters, ['id', 'ref', 'sentFromId', 'sentToId']);
+        preserveProperties($parameters, ['id', 'ref', 'sentFromId', 'sentToId', 'sendDate']);
     } elseif ($shipment->statusId == ShipmentStatus::RECEIVING) {
         preserveProperties($parameters, ['id', 'receiverId', 'receptionDate', 'receptionStatusId', 'receptionComments']);
     } else {
@@ -141,12 +141,13 @@ function shipment_update($parameters) {
 /**
  * Mark a shipment as "Sent"
  *
- * @param array $parameters
+ * @param stdClass $parameters
  */
 function shipment_send($parameters) {
     $api = LinkcareSoapAPI::getInstance();
 
     $shipmentId = loadParam($parameters, 'id');
+    $shipmentDate = loadParam($parameters, 'sendDate', DateHelper::currentDate());
     $shipment = Shipment::exists($shipmentId);
     if (!$shipment) {
         throw new ServiceException(ErrorCodes::NOT_FOUND, "Shipment $shipmentId not found");
@@ -163,7 +164,9 @@ function shipment_send($parameters) {
 
     // Mark the shipment as "Shipped" and indicate the datetime
     $parameters->statusId = ShipmentStatus::SHIPPED;
-    $parameters->sendDate = DateHelper::currentDate();
+    if (!DateHelper::isValidDate($shipmentDate)) {
+        throw new ServiceException(ErrorCodes::INVALID_DATA_FORMAT, "Invalid shipment date: " . $parameters->sendDate);
+    }
 
     $shipment->trackedCopy($parameters);
     if (!$shipment->ref) {
@@ -197,7 +200,7 @@ function shipment_send($parameters) {
         $aliquotList[] = $aliquot;
     }
 
-    $shipment->updateModified($shipment);
+    $shipment->updateModified();
     ServiceFunctions::trackAliquots($aliquotList);
 
     return new ServiceResponse($shipment->d, null);
@@ -274,14 +277,14 @@ function shipment_finish_reception($parameters) {
     $arrVariables = [':shipmentId' => $shipmentId, ':updated' => $shipment->receptionDate, ':rejectedStatus' => AliquotStatus::REJECTED,
             ':okStatus' => AliquotStatus::AVAILABLE, ':locationId' => $shipment->sentToId];
     $sqls[] = "UPDATE ALIQUOTS a, SHIPPED_ALIQUOTS sa
-            SET a.UPDATED=:updated, a.ID_STATUS=:rejectedStatus, a.ID_ALIQUOT_CONDITION=sa.ID_ALIQUOT_CONDITION,
+            SET a.ALIQUOT_UPDATED=:updated, a.ID_STATUS=:rejectedStatus, a.ID_ALIQUOT_CONDITION=sa.ID_ALIQUOT_CONDITION,
                 a.ID_LOCATION=:locationId, a.ID_SHIPMENT=NULL
             WHERE
                 sa.ID_SHIPMENT=:shipmentId
             	AND a.ID_ALIQUOT = sa.ID_ALIQUOT
             	AND sa.ID_ALIQUOT_CONDITION IS NOT NULL AND sa.ID_ALIQUOT_CONDITION <> ''";
     $sqls[] = "UPDATE ALIQUOTS a, SHIPPED_ALIQUOTS sa
-            SET a.UPDATED=:updated, a.ID_STATUS=:okStatus, a.ID_ALIQUOT_CONDITION=NULL,
+            SET a.ALIQUOT_UPDATED=:updated, a.ID_STATUS=:okStatus, a.ID_ALIQUOT_CONDITION=NULL,
                 a.ID_LOCATION=:locationId, a.ID_SHIPMENT=NULL
             WHERE
                 sa.ID_SHIPMENT=:shipmentId

@@ -62,7 +62,7 @@ require_once 'types/Shipment.php';
 require_once 'types/Aliquot.php';
 require_once 'SystemFunctions.php';
 require_once 'ServiceFunctions.php';
-// require_once 'ShipmentFunctions.php';
+require_once 'ShipmentFunctions.php';
 
 $GLOBALS['PROJECT_CODE'] = 'VAMPIRE';
 $GLOBALS['SHIPMENT_TASK_CODE'] = 'SHIPMENT_TRACKING';

@@ -34,7 +34,7 @@ header('Content-type: application/json');
 $function = $_GET['function'];
 $logger = ServiceLogger::init($GLOBALS['LOG_LEVEL'], $GLOBALS['LOG_DIR']);
 
-$publicFunctions = ['import_redcap', 'import_aliquots'];
+$publicFunctions = ['import_redcap', 'import_aliquots', 'track_pending_shipments', 'track_pending_receptions'];
 
 if (in_array($function, $publicFunctions)) {
     $json = file_get_contents('php://input');
@@ -212,7 +212,7 @@ function import_aliquots($parameters) {
             $admission->setAdmissionDate($sampleDate);
             $admission->save();
             if (!$bpForm) {
-                $msg = "Sample $displayName skipped. Aliquots already loaded";
+                $msg = "Sample $displayName skipped. Aliquots already loaded (BLOOD PROCESSING task exists and is closed)";
                 $serviceResponse->addDetails($msg);
                 ServiceLogger::getInstance()->info($msg);
                 $numSkipped++;
@@ -261,6 +261,163 @@ function import_aliquots($parameters) {
     }
 
     return $serviceResponse;
+}
+
+/**
+ * Verifies if there are new blood sample shipments created from the Shipment Control application that need to be tracked in the eCRF.
+ * If true, a new "SHIPMENT TRACKING" TASK will be created in each affected ADMISSION of the eCRF
+ *
+ * @param stdClass $parameters
+ * @return BackgroundServiceResponse
+ */
+function track_pending_shipments($parameters) {
+    $response = new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "");
+
+    // Find the shipped aliquots that have not been tracked yet in the eCRF
+    $sql = "SELECT DISTINCT sa.ID_SHIPMENT, a.ID_PATIENT, a.PATIENT_REF FROM SHIPPED_ALIQUOTS sa, SHIPMENTS s, ALIQUOTS a
+            WHERE s.ID_SHIPMENT=sa.ID_SHIPMENT AND s.ID_STATUS IN ('SHIPPED', 'RECEIVED')
+                AND (sa.ID_SHIPMENT_TASK IS NULL OR sa.ID_SHIPMENT_TASK=0) AND sa.ID_ALIQUOT = a.ID_ALIQUOT
+            ORDER BY s.SHIPMENT_DATE, a.ID_PATIENT";
+    $rst = Database::getInstance()->executeBindQuery($sql, ['statusId' => ShipmentStatus::SHIPPED]);
+    $error = Database::getInstance()->getError();
+    if ($error->getErrCode()) {
+        throw new ServiceException($error->getErrCode(), $error->getErrorMessage());
+    }
+
+    $pendingShipmentIds = [];
+    while ($rst->Next()) {
+        $pendingShipmentIds[$rst->GetField('ID_SHIPMENT')][] = ['patientId' => $rst->GetField('ID_PATIENT'),
+                'patientRef' => $rst->GetField('PATIENT_REF')];
+    }
+    if (empty($pendingShipmentIds)) {
+        return new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, 'No shipments pending to be tracked.');
+    }
+
+    $shipment = null;
+    $numSuccess = 0;
+    $numErrors = 0;
+    foreach ($pendingShipmentIds as $shipmentId => $patientIdsInShipment) {
+        $shipment = Shipment::exists($shipmentId);
+        if (!$shipment) {
+            $msg = "ERROR: SHIPMENT with ID $shipmentId not found in the Shipments database.";
+            $response->addDetails($msg);
+            $numErrors++;
+            continue;
+        }
+        $patientsSuccess = 0;
+        $patientsError = 0;
+        foreach ($patientIdsInShipment as $data) {
+            $patientId = $data['patientId'];
+            $patientRef = $data['patientRef'];
+            try {
+                ServiceFunctions::createShipmentTrackingTask($shipment, $patientId);
+                $msg = "Patient $patientRef: Shipment with ID $shipmentId tracked succsessfully in eCRF";
+                $response->addDetails($msg);
+                $patientsSuccess++;
+            } catch (ServiceException $e) {
+                $msg = "ERROR Patient $patientRef: Shipment with ID $shipmentId failed to be tracked in eCRF" . $e->getErrorMessage();
+                $response->addDetails($msg);
+                $patientsError++;
+            }
+        }
+        $msg = "SHIPMENT $shipmentId updated: patients success: $patientsSuccess, errors: $patientsError";
+        $response->addDetails($msg);
+        if ($patientsError > 0) {
+            $numErrors++;
+        } else {
+            $numSuccess++;
+        }
+    }
+
+    if ($numErrors > 0) {
+        $retCode = BackgroundServiceResponse::ERROR;
+    } elseif ($numSuccess > 0) {
+        $retCode = BackgroundServiceResponse::SUCCESS;
+    } else {
+        $retCode = BackgroundServiceResponse::IDLE;
+    }
+    $response->setMessage("Shipments updated successfully: $numSuccess, Errors: $numErrors");
+    $response->setCode($retCode);
+
+    return $response;
+}
+
+/**
+ * Verifies if there are blood sample shipments marked as received (from the Shipment Control application) that need to be tracked in the eCRF.
+ * If true, a new "RECEPTION TRACKING" TASK will be created in each affected ADMISSION of the eCRF
+ *
+ * @param stdClass $parameters
+ * @return BackgroundServiceResponse
+ */
+function track_pending_receptions($parameters) {
+    $response = new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "");
+
+    // Find the shipped aliquots that have not been tracked yet in the eCRF
+    $sql = "SELECT DISTINCT sa.ID_SHIPMENT, a.ID_PATIENT, a.PATIENT_REF, sa.ID_SHIPMENT_TASK FROM SHIPPED_ALIQUOTS sa, SHIPMENTS s, ALIQUOTS a
+            WHERE s.ID_SHIPMENT=sa.ID_SHIPMENT AND s.ID_STATUS='RECEIVED'
+                AND sa.ID_SHIPMENT_TASK > 0
+                AND (sa.ID_RECEPTION_TASK IS NULL OR sa.ID_RECEPTION_TASK=0)
+                AND sa.ID_ALIQUOT = a.ID_ALIQUOT
+            ORDER BY s.SHIPMENT_DATE, a.ID_PATIENT";
+    $rst = Database::getInstance()->executeBindQuery($sql, ['statusId' => ShipmentStatus::SHIPPED]);
+    $error = Database::getInstance()->getError();
+    if ($error->getErrCode()) {
+        throw new ServiceException($error->getErrCode(), $error->getErrorMessage());
+    }
+
+    $pendingShipmentIds = [];
+    while ($rst->Next()) {
+        $pendingShipmentIds[$rst->GetField('ID_SHIPMENT')][] = ['patientId' => $rst->GetField('ID_PATIENT'),
+                'patientRef' => $rst->GetField('PATIENT_REF'), 'trackingTaskId' => $rst->GetField('ID_SHIPMENT_TASK')];
+    }
+    if (empty($pendingShipmentIds)) {
+        return new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, 'No shipment receptions pending be tracked.');
+    }
+
+    $shipment = null;
+    $numSuccess = 0;
+    $numErrors = 0;
+    foreach ($pendingShipmentIds as $shipmentId => $patientsInShipment) {
+        $shipment = Shipment::exists($shipmentId);
+        if (!$shipment) {
+            $msg = "ERROR: SHIPMENT with ID $shipmentId not found in the Shipments database.";
+            $response->addDetails($msg);
+            $numErrors++;
+            continue;
+        }
+        $patientsSuccess = 0;
+        $patientsError = 0;
+        foreach ($patientsInShipment as $data) {
+            $patientId = $data['patientId'];
+            $patientRef = $data['patientRef'];
+            $trackingTaskId = $data['trackingTaskId'];
+
+            try {
+                ServiceFunctions::createReceptionTrackingTask($shipment, $patientId, $trackingTaskId);
+                $msg = "Patient $patientRef: Shipment with ID $shipmentId tracked succsessfully in eCRF";
+                $response->addDetails($msg);
+                $patientsSuccess++;
+            } catch (ServiceException $e) {
+                $msg = "ERROR Patient $patientRef: Shipment with ID $shipmentId failed to be tracked in eCRF" . $e->getErrorMessage();
+                $response->addDetails($msg);
+                $patientsError++;
+            }
+        }
+        $msg = "SHIPMENT $shipmentId updated: patients success: $patientsSuccess, errors: $patientsError";
+        $response->addDetails($msg);
+        if ($patientsError > 0) {
+            $numErrors++;
+        } else {
+            $numSuccess++;
+        }
+    }
+
+    $retCode = $numErrors > 0 ? BackgroundServiceResponse::ERROR : BackgroundServiceResponse::SUCCESS;
+
+    $response->setMessage("Shipment receptions updated successfully: $numSuccess, Errors: $numErrors");
+    $response->setCode($retCode);
+
+    return $response;
 }
 
 function summary_report() {

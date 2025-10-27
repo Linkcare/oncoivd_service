@@ -1202,4 +1202,190 @@ class ServiceFunctions {
 
         Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
     }
+
+    /**
+     * Updates the status of the blood sample aliquots after an action (shipment, reception...)
+     * This functions assumes that already exists a FORM that contains the last known status of the blood samples and modifies the status according to
+     * the action executed
+     *
+     * @param APIQuestion[] $modifiedAliquotsArray
+     * @param string $sampleType
+     * @param string|APIForm $statusForm Reference of the FORM containing the current status of the blood samples
+     * @return ServiceResponse
+     */
+    static public function updateSamplesStatus($modifiedAliquotsArray, $sampleType, $statusForm) {
+        // Load the list of all existing aliquots to update the status of the modified ones
+        /** @var APIForm $samplesStatusForm */
+        /** @var APIQuestion[][] $aliquotStatusArray */
+        list($samplesStatusForm, $aliquotStatusArray) = self::loadAliquotStatus($statusForm, AliquotStatus::ALL, null);
+
+        $updatableFieldMap = [];
+
+        $nowUTC = DateHelper::currentDate();
+        foreach ($modifiedAliquotsArray as $aliquotId => $modififedAliquot) {
+            if (!array_key_exists($aliquotId, $aliquotStatusArray)) {
+                throw new ServiceException(ErrorCodes::DATA_MISSING, "$sampleType aliquot $aliquotId not found in the last known status (form " .
+                        $samplesStatusForm->getId() . ")");
+            }
+            // The modified aliquot exists in the status form. We can proceed with the update
+            $currentStatus = $aliquotStatusArray[$aliquotId];
+
+            // Update the datetime of the last modification
+
+            if ($lastChangeDateItem = $currentStatus[AliquotStatusItems::CHANGE_DATE]) {
+                $lastChangeDateItem->setAnswer(DateHelper::datePart($nowUTC));
+            }
+            if ($lastChangeTimeItem = $currentStatus[AliquotStatusItems::CHANGE_TIME]) {
+                $lastChangeTimeItem->setAnswer(DateHelper::timePart($nowUTC));
+            }
+
+            foreach ($modififedAliquot as $key => $modifiedQuestion) {
+                if (array_key_exists($key, $updatableFieldMap)) {
+                    // Map the ITEM name from the modified FORM to the corresponding ITEM name in the status FORM
+                    $mappedFieldName = $updatableFieldMap[$key];
+                    // Ignore fields that should not be modified
+                    continue;
+                } elseif (AliquotStatusItems::isValidValue($key)) {
+                    $mappedFieldName = $key;
+                } else {
+                    // Ignore fields that should not be modified
+                    continue;
+                }
+
+                /** @var APIQuestion $currentStatusItem */
+                $currentStatusItem = $currentStatus[$mappedFieldName];
+                if (!$currentStatusItem) {
+                    throw new ServiceException(ErrorCodes::DATA_MISSING, "The status record of aliquot $aliquotId does not contain the field $mappedFieldName");
+                }
+
+                if ($modifiedQuestion->getValue() === $currentStatusItem->getValue()) {
+                    // No changes in this field. We can skip the update
+                    continue;
+                }
+                switch ($mappedFieldName) {
+                    case AliquotStatusItems::STATUS :
+                    case AliquotStatusItems::DAMAGE :
+                        $currentStatusItem->setOptionAnswer($modifiedQuestion->getOptionId(), $modifiedQuestion->getOptionValue());
+                        break;
+                    default :
+                        $currentStatusItem->setAnswer($modifiedQuestion->getValue());
+                        break;
+                }
+            }
+        }
+
+        $samplesStatusForm->updateAnswers();
+
+        // Concatenate the IDs of the modified aliquots in a string
+        $aliquotsModified = implode(',', array_keys($modifiedAliquotsArray));
+        return new ServiceResponse($aliquotsModified, null);
+    }
+
+    /**
+     * Retrieves the list of aliquots from the Form that contains the last known status of the blood samples.
+     * The aliquots can be filtered by status and owner<br>
+     * The return value is an associative array indexed by the aliquot ID
+     *
+     * @param int $aliquotStatusFilter Indicate which aliquots should be loaded. Use one of the AliquotStatus constants
+     * @param string|APIForm $referenceForm
+     * @param string $senderId Reference of the owner of the aliquots. If null, all aliquots will be included
+     * @return [APIForm, APIQuestion[][]]
+     */
+    static private function loadAliquotStatus($referenceForm, $aliquotStatusFilter, $ownerFilter) {
+        // Load the array of aliquots of the status FORM
+        list($samplesStatusForm, $array) = self::loadStatusForm($referenceForm);
+
+        $aliquotsArray = [];
+
+        // Filter the aliquots according to the requested filters (status, owner)
+        foreach ($array as $row) {
+            /** @var APIQuestion[] $row */
+            $aliquotId = $row[AliquotStatusItems::ID]->getValue();
+
+            $curStatus = $row[AliquotStatusItems::STATUS]->getOptionValue();
+            if (!$curStatus) {
+                $curStatus = AliquotStatus::AVAILABLE;
+            }
+            $owner = $row[AliquotStatusItems::LOCATION]->getValue();
+            if (($curStatus == $aliquotStatusFilter || $aliquotStatusFilter == AliquotStatus::ALL) && ($owner == $ownerFilter || !$ownerFilter)) {
+                $aliquotsArray[$aliquotId] = $row;
+            }
+        }
+
+        return [$samplesStatusForm, $aliquotsArray];
+    }
+
+    /**
+     * Load the array of blood samples from the Form that contains the last known status of the blood samples
+     *
+     * @param string|APIForm $formReference
+     * @return [APIForm, APIQuestion[][]]
+     */
+    static private function loadStatusForm($formReference) {
+        $api = LinkcareSoapAPI::getInstance();
+
+        if ($formReference instanceof APIForm) {
+            $samplesStatusForm = $formReference;
+        } else {
+            $samplesStatusForm = $api->form_get_summary($formReference);
+        }
+
+        // Fetch all the rows of the array
+
+        $requiredItems = [AliquotStatusItems::ID, AliquotStatusItems::LOCATION, AliquotStatusItems::CREATION_DATE, AliquotStatusItems::STATUS,
+                AliquotStatusItems::DAMAGE, AliquotStatusItems::CHANGE_DATE, AliquotStatusItems::SHIPMENT_REF];
+        $array = $samplesStatusForm->getArrayQuestions(AliquotStatusItems::ARRAY);
+
+        foreach ($array as $ix => $row) {
+            $itemCodes = array_keys($row);
+            foreach ($requiredItems as $key) {
+                if (!in_array($key, $itemCodes)) {
+                    throw new ServiceException(ErrorCodes::DATA_MISSING, "Error loading the column '$key' of the blood sample $ix from the status form $formReference");
+                }
+            }
+        }
+
+        return [$samplesStatusForm, $array];
+    }
+
+    /**
+     * Retrieves the list of aliquots of a shipment tracking FORM
+     * The return value is an associative array indexed by the aliquot ID
+     *
+     * @param APIForm $samplesStatusForm
+     * @return APIQuestion[]
+     */
+    static public function loadTrackedAliquots($samplesStatusForm) {
+        // Fetch all the rows of the array. The list of fields loaded will depend on the type of action
+        $requiredItems = [AliquotTrackingItems::ID, AliquotTrackingItems::TYPE];
+        $array = $samplesStatusForm->getArrayQuestions(AliquotTrackingItems::ARRAY);
+
+        // Verify that all the required items are present in the array and create an associative array indexed by the aliquot ID
+        $aliquotsArray = [];
+        foreach ($array as $ix => $row) {
+            $itemCodes = array_keys($row);
+            foreach ($requiredItems as $key) {
+                if (!in_array($key, $itemCodes)) {
+                    throw new ServiceException(ErrorCodes::DATA_MISSING, "Error loading the column '$key' of the blood sample $ix from the status form " .
+                            $samplesStatusForm->getId());
+                }
+            }
+
+            $aliquotId = $row[AliquotTrackingItems::ID]->getValue();
+            $aliquotsArray[$aliquotId] = $row;
+        }
+
+        return $aliquotsArray;
+    }
+
+    static private function encodeTaskInitialValues($arrValues) {
+        $initialValues = [];
+        foreach ($arrValues as $code => $value) {
+            $param = new stdClass();
+            $param->code = $code;
+            $param->value = $value;
+            $initialValues[] = $param;
+        }
+        return $initialValues;
+    }
 }
