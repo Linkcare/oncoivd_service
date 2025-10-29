@@ -358,7 +358,7 @@ class ServiceFunctions {
             }
         }
 
-        self::trackAliquots($dbRows);
+        trackAliquots($dbRows, AliquotAuditActions::CREATED);
 
         // Concatenate the added aliquot IDs into a string
         $aliquotsIncluded = implode(',', $aliquotIds);
@@ -1009,18 +1009,10 @@ class ServiceFunctions {
         }
 
         // Finally update the aliquots to indicate that they have already been tracked in a TASK of the eCRF
-        $arrVariables = [':shipmentId' => $shipment->id, ':taskId' => $shipmentTask->getId()];
         $aliquotIds = array_map(function ($aliquot) {
             return $aliquot->id;
         }, $aliquots);
-        $inCondition = DbHelper::bindParamArray('aliquotId', $aliquotIds, $arrVariables);
-        $sqls = [];
-        $sqls[] = "UPDATE SHIPPED_ALIQUOTS SET ID_SHIPMENT_TASK = :taskId WHERE ID_SHIPMENT=:shipmentId AND ID_ALIQUOT IN ($inCondition)";
-        $sqls[] = "UPDATE ALIQUOTS SET ID_TASK = :taskId WHERE ID_SHIPMENT=:shipmentId AND ID_ALIQUOT IN ($inCondition)";
-        $sqls[] = "UPDATE ALIQUOTS_HISTORY SET ID_TASK = :taskId WHERE ID_SHIPMENT=:shipmentId AND ID_ALIQUOT IN ($inCondition)";
-        foreach ($sqls as $sql) {
-            Database::getInstance()->executeBindQuery($sql, $arrVariables);
-        }
+        markTrackedAliquots('SHIPMENT', $shipment->id, $shipmentTask->getId(), $aliquotIds);
     }
 
     /**
@@ -1113,75 +1105,10 @@ class ServiceFunctions {
         }
 
         // Finally update the aliquots to indicate that they have already been tracked in a TASK of the eCRF
-        $arrVariables = [':shipmentId' => $shipment->id, ':taskId' => $shipmentTask->getId()];
         $aliquotIds = array_map(function ($aliquot) {
             return $aliquot->id;
         }, $aliquots);
-        $inCondition = DbHelper::bindParamArray('aliquotId', $aliquotIds, $arrVariables);
-        $sqls = [];
-        $sqls[] = "UPDATE SHIPPED_ALIQUOTS SET ID_RECEPTION_TASK = :taskId WHERE ID_SHIPMENT=:shipmentId";
-        $sqls[] = "UPDATE ALIQUOTS SET ID_TASK = :taskId WHERE ID_SHIPMENT=:shipmentId AND ID_ALIQUOT IN ($inCondition)";
-        $sqls[] = "UPDATE ALIQUOTS_HISTORY SET ID_TASK = :taskId WHERE ID_SHIPMENT=:shipmentId AND ID_ALIQUOT IN ($inCondition)";
-        foreach ($sqls as $sql) {
-            Database::getInstance()->executeBindQuery($sql, $arrVariables);
-        }
-    }
-
-    /**
-     * Creates or updates a tracking of aliquots in the database.
-     *
-     * @param array $dbRows
-     */
-    static public function trackAliquots($dbRows) {
-        $arrVariables = [];
-
-        $dbColumnNames = ['ID_ALIQUOT', 'ID_PATIENT', 'PATIENT_REF', 'SAMPLE_TYPE', 'ID_LOCATION', 'ID_STATUS', 'ID_ALIQUOT_CONDITION', 'ID_TASK',
-                'ALIQUOT_CREATED', 'ALIQUOT_UPDATED', 'ID_SHIPMENT', 'RECORD_TIMESTAMP'];
-
-        $now = DateHelper::currentDate();
-        foreach ($dbRows as $row) {
-            $arrVariables = [];
-            $row['RECORD_TIMESTAMP'] = $now; // Add the current timestamp to track the real time when the DB record was created/modified
-
-            // Read the last known values of the aliquot to be updated
-            $sqlPrev = "SELECT * FROM ALIQUOTS WHERE ID_ALIQUOT=:id";
-            $rst = Database::getInstance()->ExecuteBindQuery($sqlPrev, $row['ID_ALIQUOT']);
-            $prevValues = [];
-            while ($rst->Next()) {
-                foreach ($rst->getColumnNames() as $colName) {
-                    $prevValues[$colName] = $rst->GetField($colName);
-                }
-            }
-
-            $keyColumns = ['ID_ALIQUOT' => ':id_aliquot'];
-
-            $updateColumns = [];
-            foreach ($dbColumnNames as $colName) {
-                $parameterName = ':' . strtolower($colName);
-                if (array_key_exists($colName, $row)) {
-                    // New value provided for the column
-                    $arrVariables[$parameterName] = $row[$colName];
-                } elseif (array_key_exists($colName, $prevValues)) {
-                    // If the column is not present in the row, we must keep the previous value
-                    $arrVariables[$parameterName] = $prevValues[$colName];
-                } else {
-                    $arrVariables[$parameterName] = null;
-                }
-                if (!array_key_exists($colName, $keyColumns)) {
-                    $updateColumns[$colName] = $parameterName;
-                }
-            }
-
-            $sql = Database::getInstance()->buildInsertOrUpdateQuery('ALIQUOTS', $keyColumns, $updateColumns);
-            Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
-
-            /*
-             * Add the tracking of the aliquots in the ALIQUOTS_HISTORY table
-             */
-            $sql = "INSERT INTO ALIQUOTS_HISTORY (ID_ALIQUOT, ID_TASK, ID_LOCATION, ID_STATUS, ID_ALIQUOT_CONDITION, ALIQUOT_UPDATED, ID_SHIPMENT, RECORD_TIMESTAMP)
-                        VALUES (:id_aliquot, :id_task, :id_location, :id_status, :id_aliquot_condition, :aliquot_updated, :id_shipment, :record_timestamp)";
-            Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
-        }
+        markTrackedAliquots('RECEPTION', $shipment->id, $shipmentTask->getId(), $aliquotIds);
     }
 
     static private function addLocation($locationId) {

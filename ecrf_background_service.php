@@ -274,36 +274,21 @@ function track_pending_shipments($parameters) {
     $response = new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "");
 
     // Find the shipped aliquots that have not been tracked yet in the eCRF
-    $sql = "SELECT DISTINCT sa.ID_SHIPMENT, a.ID_PATIENT, a.PATIENT_REF FROM SHIPPED_ALIQUOTS sa, SHIPMENTS s, ALIQUOTS a
-            WHERE s.ID_SHIPMENT=sa.ID_SHIPMENT AND s.ID_STATUS IN ('SHIPPED', 'RECEIVED')
-                AND (sa.ID_SHIPMENT_TASK IS NULL OR sa.ID_SHIPMENT_TASK=0) AND sa.ID_ALIQUOT = a.ID_ALIQUOT
-            ORDER BY s.SHIPMENT_DATE, a.ID_PATIENT";
-    $rst = Database::getInstance()->executeBindQuery($sql, ['statusId' => ShipmentStatus::SHIPPED]);
-    $error = Database::getInstance()->getError();
-    if ($error->getErrCode()) {
-        throw new ServiceException($error->getErrCode(), $error->getErrorMessage());
-    }
+    $untrackedShipments = untrackedShipments();
 
-    $pendingShipmentIds = [];
-    while ($rst->Next()) {
-        $pendingShipmentIds[$rst->GetField('ID_SHIPMENT')][] = ['patientId' => $rst->GetField('ID_PATIENT'),
-                'patientRef' => $rst->GetField('PATIENT_REF')];
-    }
-    if (empty($pendingShipmentIds)) {
+    if (empty($untrackedShipments)) {
         return new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, 'No shipments pending to be tracked.');
     }
 
     $shipment = null;
     $numSuccess = 0;
     $numErrors = 0;
-    foreach ($pendingShipmentIds as $shipmentId => $patientIdsInShipment) {
-        $shipment = Shipment::exists($shipmentId);
-        if (!$shipment) {
-            $msg = "ERROR: SHIPMENT with ID $shipmentId not found in the Shipments database.";
-            $response->addDetails($msg);
-            $numErrors++;
-            continue;
-        }
+    foreach ($untrackedShipments as $shipmentData) {
+        /** @var Shipment $shipment */
+        $shipment = $shipmentData['shipment'];
+        $patientIdsInShipment = $shipmentData['patients'];
+        $shipmentId = $shipment->id;
+
         $patientsSuccess = 0;
         $patientsError = 0;
         foreach ($patientIdsInShipment as $data) {
@@ -353,41 +338,23 @@ function track_pending_receptions($parameters) {
     $response = new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, "");
 
     // Find the shipped aliquots that have not been tracked yet in the eCRF
-    $sql = "SELECT DISTINCT sa.ID_SHIPMENT, a.ID_PATIENT, a.PATIENT_REF, sa.ID_SHIPMENT_TASK FROM SHIPPED_ALIQUOTS sa, SHIPMENTS s, ALIQUOTS a
-            WHERE s.ID_SHIPMENT=sa.ID_SHIPMENT AND s.ID_STATUS='RECEIVED'
-                AND sa.ID_SHIPMENT_TASK > 0
-                AND (sa.ID_RECEPTION_TASK IS NULL OR sa.ID_RECEPTION_TASK=0)
-                AND sa.ID_ALIQUOT = a.ID_ALIQUOT
-            ORDER BY s.SHIPMENT_DATE, a.ID_PATIENT";
-    $rst = Database::getInstance()->executeBindQuery($sql, ['statusId' => ShipmentStatus::SHIPPED]);
-    $error = Database::getInstance()->getError();
-    if ($error->getErrCode()) {
-        throw new ServiceException($error->getErrCode(), $error->getErrorMessage());
-    }
-
-    $pendingShipmentIds = [];
-    while ($rst->Next()) {
-        $pendingShipmentIds[$rst->GetField('ID_SHIPMENT')][] = ['patientId' => $rst->GetField('ID_PATIENT'),
-                'patientRef' => $rst->GetField('PATIENT_REF'), 'trackingTaskId' => $rst->GetField('ID_SHIPMENT_TASK')];
-    }
-    if (empty($pendingShipmentIds)) {
+    $untrackedReceptions = untrackedReceptions();
+    if (empty($untrackedReceptions)) {
         return new BackgroundServiceResponse(BackgroundServiceResponse::IDLE, 'No shipment receptions pending be tracked.');
     }
 
     $shipment = null;
     $numSuccess = 0;
     $numErrors = 0;
-    foreach ($pendingShipmentIds as $shipmentId => $patientsInShipment) {
-        $shipment = Shipment::exists($shipmentId);
-        if (!$shipment) {
-            $msg = "ERROR: SHIPMENT with ID $shipmentId not found in the Shipments database.";
-            $response->addDetails($msg);
-            $numErrors++;
-            continue;
-        }
+    foreach ($untrackedReceptions as $shipmentData) {
+        /** @var Shipment $shipment */
+        $shipment = $shipmentData['shipment'];
+        $patientIdsInShipment = $shipmentData['patients'];
+        $shipmentId = $shipment->id;
+
         $patientsSuccess = 0;
         $patientsError = 0;
-        foreach ($patientsInShipment as $data) {
+        foreach ($patientIdsInShipment as $data) {
             $patientId = $data['patientId'];
             $patientRef = $data['patientRef'];
             $trackingTaskId = $data['trackingTaskId'];

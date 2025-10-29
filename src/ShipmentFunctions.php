@@ -25,12 +25,13 @@ function shipment_locations($parameters) {
 function shipment_list($parameters) {
     $api = LinkcareSoapAPI::getInstance();
 
+    $activeTeamId = loadParam($parameters, 'activeLocation');
     $page = loadParam($parameters, 'page');
     $pageSize = loadParam($parameters, 'pageSize');
     $filters = loadParam($parameters, 'filters');
     cleanFilters($filters);
 
-    $arrVariables[':currentTeamId'] = $api->getSession()->getTeamId();
+    $arrVariables[':activeTeamId'] = $activeTeamId ? $activeTeamId : $api->getSession()->getTeamId();
     $arrVariables[':statusPreparing'] = ShipmentStatus::PREPARING;
 
     $filterConditions = [];
@@ -54,7 +55,7 @@ function shipment_list($parameters) {
     $queryFromClause = "FROM SHIPMENTS s
                 LEFT JOIN LOCATIONS l1 ON s.ID_SENT_FROM = l1.ID_LOCATION
                 LEFT JOIN LOCATIONS l2 ON s.ID_SENT_TO = l2.ID_LOCATION
-            WHERE (s.ID_SENT_FROM=:currentTeamId OR (s.ID_SENT_TO=:currentTeamId AND s.ID_STATUS <> :statusPreparing)) $filterSql";
+            WHERE (s.ID_SENT_FROM=:activeTeamId OR (s.ID_SENT_TO=:activeTeamId AND s.ID_STATUS <> :statusPreparing)) $filterSql";
     list($rst, $totalRows) = fetchWithPagination($queryColumns, $queryFromClause, $arrVariables, $pageSize, $page);
 
     $shipmentList = [];
@@ -168,6 +169,13 @@ function shipment_send($parameters) {
         throw new ServiceException(ErrorCodes::INVALID_DATA_FORMAT, "Invalid shipment date: " . $parameters->sendDate);
     }
 
+    if ($senderId = loadParam($parameters, 'id') ?? $shipment->senderId) {
+        try {
+            $user = $api->user_get($senderId);
+            $parameters->sender = $user->getFullName();
+        } catch (Exception $e) {}
+    }
+
     $shipment->trackedCopy($parameters);
     if (!$shipment->ref) {
         throw new ServiceException(ErrorCodes::DATA_MISSING, "Shipment reference was not informed but is mandatory for sending a shipment");
@@ -179,12 +187,13 @@ function shipment_send($parameters) {
         throw new ServiceException(ErrorCodes::DATA_MISSING, "Destination was not informed but is mandatory for sending a shipment");
     }
 
-    try {
-        $user = $api->user_get($shipment->senderId);
-        $parameters->sender = $user->getFullName();
-    } catch (Exception $e) {}
-
     // Update the last modification date of the aliquots and generate a tracking record
+    $aliquots = $shipment->getAliquots();
+    foreach ($aliquots as $aliquot) {
+        $aliquot->statusId = AliquotStatus::IN_TRANSIT;
+        $aliquot->lastUpdate = $shipment->sendDate;
+    }
+
     $arrVariables = [':shipmentId' => $shipmentId];
     $sql = "SELECT * FROM ALIQUOTS WHERE ID_SHIPMENT=:shipmentId";
     $rst = Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
@@ -201,7 +210,7 @@ function shipment_send($parameters) {
     }
 
     $shipment->updateModified();
-    ServiceFunctions::trackAliquots($aliquotList);
+    trackAliquots($aliquotList, AliquotAuditActions::SHIPPED);
 
     return new ServiceResponse($shipment->d, null);
 }
@@ -311,7 +320,7 @@ function shipment_finish_reception($parameters) {
         $aliquotList[] = $aliquot;
     }
 
-    ServiceFunctions::trackAliquots($aliquotList);
+    trackAliquots($aliquotList, AliquotAuditActions::RECEIVED);
 
     return new ServiceResponse($shipment->d, null);
 }
@@ -553,6 +562,215 @@ function shipment_remove_aliquot($params) {
     Database::getInstance()->executeBindQuery($sql, $arrVariables);
 
     return new ServiceResponse(1, null);
+}
+
+/**
+ * Creates or updates a tracking of aliquots in the database.
+ * <ul>
+ * <li>If the aliquot does not exist in the ALIQUTOS table, it is created with the provided values.</li>
+ * <li>A record is created in the ALIQUOTS_HISTORY table to maintain an audit log of the changes</li>
+ * </ul>
+ *
+ * @param array $dbRows
+ */
+function trackAliquots($dbRows, $action = AliquotAuditActions::CREATED) {
+    $arrVariables = [];
+
+    $dbColumnNames = ['ID_ALIQUOT', 'ID_PATIENT', 'PATIENT_REF', 'SAMPLE_TYPE', 'ID_LOCATION', 'ID_STATUS', 'ID_ALIQUOT_CONDITION', 'ID_TASK',
+            'ALIQUOT_CREATED', 'ALIQUOT_UPDATED', 'ID_SHIPMENT', 'RECORD_TIMESTAMP'];
+
+    $now = DateHelper::currentDate();
+    foreach ($dbRows as $row) {
+        $arrVariables[':action'] = $action;
+        $row['RECORD_TIMESTAMP'] = $now; // Add the current timestamp to track the real time when the DB record was created/modified
+
+        // Read the last known values of the aliquot to be updated
+        $sqlPrev = "SELECT * FROM ALIQUOTS WHERE ID_ALIQUOT=:id";
+        $rst = Database::getInstance()->ExecuteBindQuery($sqlPrev, $row['ID_ALIQUOT']);
+        $prevValues = [];
+        while ($rst->Next()) {
+            foreach ($rst->getColumnNames() as $colName) {
+                $prevValues[$colName] = $rst->GetField($colName);
+            }
+        }
+
+        $keyColumns = ['ID_ALIQUOT' => ':id_aliquot'];
+
+        $updateColumns = [];
+        foreach ($dbColumnNames as $colName) {
+            $parameterName = ':' . strtolower($colName);
+            if (array_key_exists($colName, $row)) {
+                // New value provided for the column
+                $arrVariables[$parameterName] = $row[$colName];
+            } elseif (array_key_exists($colName, $prevValues)) {
+                // If the column is not present in the row, we must keep the previous value
+                $arrVariables[$parameterName] = $prevValues[$colName];
+            } else {
+                $arrVariables[$parameterName] = null;
+            }
+            if (!array_key_exists($colName, $keyColumns)) {
+                $updateColumns[$colName] = $parameterName;
+            }
+        }
+
+        $sql = Database::getInstance()->buildInsertOrUpdateQuery('ALIQUOTS', $keyColumns, $updateColumns);
+        Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
+
+        /*
+         * Add the tracking of the aliquots in the ALIQUOTS_HISTORY table
+         */
+        $sql = "INSERT INTO ALIQUOTS_HISTORY (ID_ALIQUOT, ID_TASK, ACTION, ID_LOCATION, ID_STATUS, ID_ALIQUOT_CONDITION, ALIQUOT_UPDATED, ID_SHIPMENT, RECORD_TIMESTAMP)
+                        VALUES (:id_aliquot, :id_task, :action, :id_location, :id_status, :id_aliquot_condition, :aliquot_updated, :id_shipment, :record_timestamp)";
+        Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
+    }
+}
+
+/**
+ * Returns the list of shipments that have shipped aliquots that have not been tracked yet in the eCRF.
+ * The conditions to consider that a Shipment is pending to be tracked are:
+ * <ul>
+ * <li>The shipment must be in "Shipped" or "Received" status</li>
+ * <li>At least one of the aliquots in the shipment has not been tracked yet in the eCRF, what means that they do not have an associated eCRF
+ * Task to track the shipment (which contains the information about the shipment)</li>
+ * </ul>
+ * The returned value is an array where each item is an associative array with the following structure:
+ * <ul>
+ * <li>shipment: Shipment</li>
+ * <li>patients: array of ['patientId' => ..., 'patientRef' => ...]: The list of patients in the shipment with untracked aliquots</li>
+ * </ul>
+ *
+ * @return array
+ */
+function untrackedShipments() {
+    // Find the shipped aliquots that have not been tracked yet in the eCRF
+    $sql = "SELECT DISTINCT sa.ID_SHIPMENT, a.ID_PATIENT, a.PATIENT_REF 
+            FROM SHIPPED_ALIQUOTS sa, SHIPMENTS s, ALIQUOTS a
+            WHERE s.ID_SHIPMENT=sa.ID_SHIPMENT AND s.ID_STATUS IN (:statusShipped, :statusReceived)
+                AND (sa.ID_SHIPMENT_TASK IS NULL OR sa.ID_SHIPMENT_TASK=0) AND sa.ID_ALIQUOT = a.ID_ALIQUOT
+            ORDER BY s.SHIPMENT_DATE, a.ID_PATIENT";
+    $rst = Database::getInstance()->executeBindQuery($sql,
+            [':statusShipped' => ShipmentStatus::SHIPPED, ':statusReceived' => ShipmentStatus::RECEIVED]);
+    $error = Database::getInstance()->getError();
+    if ($error->getErrCode()) {
+        throw new ServiceException($error->getErrCode(), $error->getErrorMessage());
+    }
+
+    $pendingShipmentIds = [];
+    while ($rst->Next()) {
+        $pendingShipmentIds[$rst->GetField('ID_SHIPMENT')][] = ['patientId' => $rst->GetField('ID_PATIENT'),
+                'patientRef' => $rst->GetField('PATIENT_REF')];
+    }
+
+    $untrackedShipments = [];
+    foreach ($pendingShipmentIds as $shipmentId => $patientIdsInShipment) {
+        if ($shipment = Shipment::exists($shipmentId)) {
+            $untrackedShipments[] = ['shipment' => $shipment, 'patients' => $patientIdsInShipment];
+        }
+    }
+
+    return $untrackedShipments;
+}
+
+/**
+ * Returns the list of shipments that have aliquots received at the destination of a shipment that have not been tracked yet in the eCRF.
+ * The conditions to consider that the reception of a Shipment is pending to be tracked are:
+ * <ul>
+ * <li>The shipment must be in "Received" status</li>
+ * <li>At least one of the aliquots in the shipment has not been tracked yet in the eCRF, what means that they do not have an associated eCRF
+ * Task to track the reception (which contains the information about the reception)</li>
+ * </ul>
+ * The returned value is an array where each item is an associative array with the following structure:
+ * <ul>
+ * <li>shipment: Shipment</li>
+ * <li>patients: array of ['patientId' => ..., 'patientRef' => ..., 'trackingTaskId' => ...]: The list of patients in the shipment with untracked
+ * aliquots</li>
+ * </ul>
+ *
+ * @return array
+ */
+function untrackedReceptions() {
+    // Find the shipped aliquots that have not been tracked yet in the eCRF
+    $sql = "SELECT DISTINCT sa.ID_SHIPMENT, a.ID_PATIENT, a.PATIENT_REF, sa.ID_SHIPMENT_TASK FROM SHIPPED_ALIQUOTS sa, SHIPMENTS s, ALIQUOTS a
+            WHERE s.ID_SHIPMENT=sa.ID_SHIPMENT AND s.ID_STATUS=:statusReceived
+                AND sa.ID_SHIPMENT_TASK > 0
+                AND (sa.ID_RECEPTION_TASK IS NULL OR sa.ID_RECEPTION_TASK=0)
+                AND sa.ID_ALIQUOT = a.ID_ALIQUOT
+            ORDER BY s.SHIPMENT_DATE, a.ID_PATIENT";
+
+    $rst = Database::getInstance()->executeBindQuery($sql, [':statusReceived' => ShipmentStatus::RECEIVED]);
+    $error = Database::getInstance()->getError();
+    if ($error->getErrCode()) {
+        throw new ServiceException($error->getErrCode(), $error->getErrorMessage());
+    }
+
+    $pendingShipmentIds = [];
+    while ($rst->Next()) {
+        $pendingShipmentIds[$rst->GetField('ID_SHIPMENT')][] = ['patientId' => $rst->GetField('ID_PATIENT'),
+                'patientRef' => $rst->GetField('PATIENT_REF'), 'trackingTaskId' => $rst->GetField('ID_SHIPMENT_TASK')];
+    }
+
+    $untrackedReceptions = [];
+    foreach ($pendingShipmentIds as $shipmentId => $patientIdsInShipment) {
+        if ($shipment = Shipment::exists($shipmentId)) {
+            $untrackedReceptions[] = ['shipment' => $shipment, 'patients' => $patientIdsInShipment];
+        }
+    }
+
+    return $untrackedReceptions;
+}
+
+/**
+ * Updates the aliquots that have been successfully tracked in the eCRF to indicate the associated tracking task.
+ *
+ * @param string $trackedAction 'SHIPMENT' or 'RECEPTION'
+ * @param number $shipmentId
+ * @param string $taskId
+ * @param string[] $aliquotIds
+ */
+function markTrackedAliquots($trackedAction, $shipmentId, $taskId, $aliquotIds) {
+    $shipment = Shipment::exists($shipmentId);
+    if (!$shipment) {
+        throw new ServiceException(ErrorCodes::NOT_FOUND, "Shipment with ID $shipmentId not found while marking tracked receptions");
+    }
+
+    $aliquots = array_filter($shipment->getAliquots(),
+            function ($aliquot) use ($aliquotIds) {
+                /** @var Aliquot $aliquot */
+                return in_array($aliquot->id, $aliquotIds);
+            });
+
+    if (count($aliquots) != count($aliquotIds)) {
+        $foundIds = array_map(function ($aliquot) {
+            return $aliquot->id;
+        }, $aliquots);
+        $missingIds = array_diff($aliquotIds, $foundIds);
+        throw new ServiceException(ErrorCodes::NOT_FOUND, "Some aliquots of the shipment with ID $shipmentId were not found while marking tracked receptions: " .
+                implode(', ', $missingIds));
+    }
+
+    $taskColumn = null;
+    $action = null;
+    switch ($trackedAction) {
+        case 'SHIPMENT' :
+            $taskColumn = 'ID_SHIPMENT_TASK';
+            $action = AliquotAuditActions::SHIPMENT_TRACKED;
+            break;
+        case 'RECEPTION' :
+            $taskColumn = 'ID_RECEPTION_TASK';
+            $action = AliquotAuditActions::RECEPTION_TRACKED;
+            break;
+        default :
+            throw new ServiceException(ErrorCodes::INVALID_DATA_FORMAT, "Invalid tracked action: $trackedAction");
+    }
+    $arrVariables = [':shipmentId' => $shipmentId, ':taskId' => $taskId];
+    $inCondition = DbHelper::bindParamArray('aliquotId', $aliquotIds, $arrVariables);
+    $sql = "UPDATE SHIPPED_ALIQUOTS SET $taskColumn = :taskId WHERE ID_SHIPMENT=:shipmentId AND ID_ALIQUOT IN ($inCondition)";
+    Database::getInstance()->executeBindQuery($sql, $arrVariables);
+
+    foreach ($aliquots as $aliquot) {
+        $aliquot->taskId = $taskId;
+        $aliquot->save($action);
+    }
 }
 
 /* ************************************************************************************* */

@@ -72,6 +72,7 @@ class DbDataModels {
         $indexes = null;
         $columns[] = new DbColumnDefinition('ID_HISTORY', DbDataTypes::BIGINT, null, null, false, null, true);
         $columns[] = new DbColumnDefinition('ID_ALIQUOT', DbDataTypes::VARCHAR, 64, null, false);
+        $columns[] = new DbColumnDefinition('ACTION', DbDataTypes::VARCHAR, 64, null, false);
         $columns[] = new DbColumnDefinition('ID_TASK', DbDataTypes::BIGINT, null, null, false);
         $columns[] = new DbColumnDefinition('ID_LOCATION', DbDataTypes::VARCHAR, 32, null, false);
         $columns[] = new DbColumnDefinition('ID_STATUS', DbDataTypes::VARCHAR, 32, null, false);

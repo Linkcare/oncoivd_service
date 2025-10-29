@@ -40,6 +40,9 @@ class Aliquot {
     /** @var string */
     public $conditionId;
 
+    /** @var string */
+    public $taskId;
+
     /** @var number */
     public $shipmentId;
 
@@ -63,16 +66,18 @@ class Aliquot {
         $aliquot->type = $rst->GetField('SAMPLE_TYPE');
         $aliquot->locationId = $rst->GetField('ID_LOCATION');
         $aliquot->location = $rst->GetField('LOCATION_NAME');
+        $aliquot->statusId = $rst->GetField('ID_STATUS');
+        $aliquot->status = $rst->GetField('ID_STATUS');
+        $aliquot->conditionId = $rst->GetField('ID_ALIQUOT_CONDITION');
+        $aliquot->taskId = $rst->GetField('ID_TASK');
+        $aliquot->shipmentId = $rst->GetField('ID_SHIPMENT');
+        $aliquot->created = DateHelper::UTCToLocal($rst->GetField('ALIQUOT_CREATED'), $timezone);
+        $aliquot->lastUpdate = DateHelper::UTCToLocal($rst->GetField('ALIQUOT_UPDATED'), $timezone);
+
         $aliquot->sentFromId = $rst->GetField('ID_SENT_FROM');
         $aliquot->sentFrom = $rst->GetField('SENT_FROM');
         $aliquot->sentToId = $rst->GetField('ID_SENT_TO');
         $aliquot->sentTo = $rst->GetField('SENT_TO');
-        $aliquot->statusId = $rst->GetField('ID_STATUS');
-        $aliquot->status = $rst->GetField('ID_STATUS');
-        $aliquot->conditionId = $rst->GetField('ID_ALIQUOT_CONDITION');
-        $aliquot->shipmentId = $rst->GetField('ID_SHIPMENT');
-        $aliquot->created = DateHelper::UTCToLocal($rst->GetField('ALIQUOT_CREATED'), $timezone);
-        $aliquot->lastUpdate = DateHelper::UTCToLocal($rst->GetField('ALIQUOT_UPDATED'), $timezone);
 
         return $aliquot;
     }
@@ -109,7 +114,7 @@ class Aliquot {
      * @param string[] $aliquotIds
      * @return Aliquot[]
      */
-    public function findAliquots($aliquotIds) {
+    static public function findAliquots($aliquotIds) {
         $aliquots = [];
         $arrVariables = [];
         $condition = DbHelper::bindParamArray('alId', $aliquotIds, $arrVariables);
@@ -120,5 +125,50 @@ class Aliquot {
         }
 
         return $aliquots;
+    }
+
+    /**
+     * Save the aliquot information in the database
+     *
+     * @param string $logAction
+     */
+    public function save($logAction = null) {
+        $arrVariables = [];
+
+        $now = DateHelper::currentDate();
+
+        $arrVariables[':id_aliquot'] = $this->id;
+        $arrVariables[':id_patient'] = $this->patientId;
+        $arrVariables[':patient_ref'] = $this->patientRef;
+        $arrVariables[':sample_type'] = $this->type;
+        $arrVariables[':id_location'] = $this->locationId;
+        $arrVariables[':id_status'] = $this->statusId;
+        $arrVariables[':id_aliquot_condition'] = $this->conditionId;
+        $arrVariables[':id_task'] = $this->taskId;
+        $arrVariables[':aliquot_created'] = $this->created;
+        $arrVariables[':aliquot_updated'] = $this->lastUpdate;
+        $arrVariables[':id_shipment'] = $this->shipmentId;
+        $arrVariables[':record_timestamp'] = $now;
+
+        $arrVariables[':action'] = $logAction;
+
+        $keyColumns = ['ID_ALIQUOT' => ':id_aliquot'];
+        $updateColumns = ['ID_PATIENT' => ':id_patient', 'PATIENT_REF' => ':patient_ref', 'SAMPLE_TYPE' => ':sample_type',
+                'ID_LOCATION' => ':id_location', 'ID_STATUS' => ':id_status', 'ID_ALIQUOT_CONDITION' => ':id_aliquot_condition',
+                'ID_TASK' => ':id_task', 'ALIQUOT_CREATED' => ':aliquot_created', 'ALIQUOT_UPDATED' => ':aliquot_updated',
+                'ID_SHIPMENT' => ':id_shipment', 'RECORD_TIMESTAMP' => ':record_timestamp'];
+
+        $sql = Database::getInstance()->buildInsertOrUpdateQuery('ALIQUOTS', $keyColumns, $updateColumns);
+        Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
+
+        /*
+         * Add the tracking of the aliquot changes in the ALIQUOTS_HISTORY table
+         */
+        if ($logAction) {
+            $sql = "INSERT INTO ALIQUOTS_HISTORY (ID_ALIQUOT, ID_TASK, ACTION, ID_LOCATION, ID_STATUS, ID_ALIQUOT_CONDITION, ALIQUOT_UPDATED, ID_SHIPMENT, RECORD_TIMESTAMP)
+                        VALUES (:id_aliquot, :id_task, :action, :id_location, :id_status, :id_aliquot_condition, :aliquot_updated, :id_shipment, :record_timestamp)";
+        }
+
+        Database::getInstance()->ExecuteBindQuery($sql, $arrVariables);
     }
 }

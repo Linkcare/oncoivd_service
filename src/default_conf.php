@@ -58,6 +58,7 @@ require_once 'constants/TrackingItems.php';
 require_once 'constants/AliquotTrackingItems.php';
 require_once 'constants/ShipmentStatus.php';
 require_once 'constants/ReceptionStatus.php';
+require_once 'constants/AliquotAuditActions.php';
 require_once 'types/Shipment.php';
 require_once 'types/Aliquot.php';
 require_once 'SystemFunctions.php';
